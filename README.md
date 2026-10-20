@@ -144,6 +144,26 @@ make package
 | 生成回复 | DeepSeek / 豆包 等 | 同上，OpenAI 兼容即可 |
 | 真人读心 | 同上 | 同上 |
 
+**判断层怎么填**
+
+判断层走结构化问答端点，三项配置格式：
+
+| 配置项 | 填什么 | 说明 |
+|---|---|---|
+| 服务地址 | 完整 systemone 端点，或根地址 | 末尾是 `systemone/evaluate/decisions` → 原样使用；末尾是 `v1` → 自动补 `/systemone`；其他 → 自动补 `/v1/systemone` |
+| Key 密钥 | 一段 token 字符串 | 请求时自动加 `Bearer` 前缀，**不要**自己带 "Bearer " |
+| 模型 | 判断层模型名 | 例如 `bocha-jev-v1` |
+
+示例（bocha systemone 端点）：
+
+```
+服务地址 : https://jev.bocha.cn/v1/systemone
+Key 密钥 : sk-你申请的token
+模型    : bocha-jev-v1
+```
+
+> 说明：判断层默认走结构化问答端点（`/systemone`）。如果你的服务只提供普通 chat 接口，也可走 OpenAI 兼容的 `chat/completions`——此时地址填根地址即可，代码会自动补 `/chat/completions`。
+
 以豆包（火山方舟）为例，仅需把生成层的 base / model / key 改成：
 
 ```
