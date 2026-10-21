@@ -94,14 +94,18 @@ static BOOL WIARevokedIsSelf(id wrap)
 
     @try {
         NSString *msgContent = arg1.m_nsContent ?: @"";
-        NSString *fromUsrName = @"未知用户";
+        // 先拿撤回消息自带的发送者，XML 文案解析失败（英文系统/微信改文案）时仍能显示。
+        NSString *fromUsrName = nil;
+        @try { fromUsrName = arg1.m_nsFromUsr; } @catch (NSException *e) {}
+        if (fromUsrName.length == 0) fromUsrName = @"对方";
 
         NSRange cdataRange = [msgContent rangeOfString:@"<![CDATA["];
         if (cdataRange.location != NSNotFound) {
             NSUInteger start = cdataRange.location + cdataRange.length;
             NSRange endRange = [msgContent rangeOfString:@"撤回了一条消息"];
             if (endRange.location != NSNotFound && endRange.location > start) {
-                fromUsrName = [msgContent substringWithRange:NSMakeRange(start, endRange.location - start)];
+                NSString *parsed = [msgContent substringWithRange:NSMakeRange(start, endRange.location - start)];
+                if (parsed.length) fromUsrName = parsed;
             }
         }
 
@@ -185,6 +189,28 @@ static BOOL WIARevokedIsSelf(id wrap)
 %end
 
 #pragma mark - 微信运动步数
+
+// 一天内的完成比例：凌晨/清晨低，白天爬升，21 点后满额。函数随时刻单调不减，
+// 避免同一分钟内多次刷新时数字上下跳。
+static double WIADayStepFraction(NSInteger hour, NSInteger minute, NSInteger second) {
+    NSInteger t = hour * 3600 + minute * 60 + second;
+    const NSInteger h7 = 7 * 3600, h9 = 9 * 3600, h18 = 18 * 3600, h21 = 21 * 3600;
+    if (t <= h7) return 0.02;
+    if (t <= h9) return 0.02 + 0.23 * (double)(t - h7) / (double)(h9 - h7);
+    if (t <= h18) return 0.25 + 0.55 * (double)(t - h9) / (double)(h18 - h9);
+    if (t <= h21) return 0.80 + 0.20 * (double)(t - h18) / (double)(h21 - h18);
+    return 1.0;
+}
+
+// 每天一个固定偏移，避免每次取值都重新随机导致步数抖动。
+static NSInteger WIADayStepOffset(void) {
+    NSInteger day = [[NSCalendar currentCalendar]
+                     ordinalityOfUnit:NSCalendarUnitDay
+                               inUnit:NSCalendarUnitYear
+                              forDate:[NSDate date]];
+    return (NSInteger)((day * 37 + 13) % 401) - 200;
+}
+
 %hook WCDeviceStepObject
 
 - (NSInteger)m7StepCount {
@@ -210,13 +236,8 @@ static BOOL WIARevokedIsSelf(id wrap)
     NSInteger minute = [calendar component:NSCalendarUnitMinute fromDate:now];
     NSInteger second = [calendar component:NSCalendarUnitSecond fromDate:now];
 
-    NSInteger totalSeconds = 21 * 3600;
-    NSInteger currentSeconds = hour * 3600 + minute * 60 + second;
-    if (currentSeconds > totalSeconds) currentSeconds = totalSeconds;
-
-    double targetStepsCalc = stepTarget * ((double)currentSeconds / (double)totalSeconds);
-    int randomOffset = arc4random_uniform(401) - 200;
-    targetStepsCalc += randomOffset;
+    double targetStepsCalc = stepTarget * WIADayStepFraction(hour, minute, second);
+    targetStepsCalc += WIADayStepOffset();
     if (targetStepsCalc < 0) targetStepsCalc = 0;
 
     NSInteger finalSteps = MAX(originalSteps, (NSInteger)targetStepsCalc);

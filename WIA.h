@@ -45,24 +45,7 @@
 
 
 @interface NewSettingViewController (WIAUI)
-- (UILabel *)wiaRowLabel:(NSString *)t;
-- (void)wiaAddSwitchRow:(UIView *)group title:(NSString *)t on:(BOOL)on action:(SEL)sel y:(CGFloat *)y w:(CGFloat)w;
-- (void)wiaAddTapRow:(UIView *)group title:(NSString *)t value:(NSString *)v key:(NSString *)key action:(SEL)sel y:(CGFloat *)y w:(CGFloat)w;
-- (void)wiaRebuildSettings:(UIScrollView *)scroll;
-- (void)wiaTapConfigRow:(UIControl *)sender;
-- (void)wiaChooseContext:(id)sender;
-- (void)wiaChooseTones:(id)sender;
-- (void)wiaChooseAutoReply:(id)sender;
 - (void)openXiaoweiPage:(id)sender;
-- (void)toggleKeepAlive:(UISwitch *)sender;
-- (void)togglePreventRevoke:(UISwitch *)sender;
-- (void)toggleStepSpoof:(UISwitch *)sender;
-- (void)toggleJudgeEnabled:(UISwitch *)sender;
-- (void)toggleGenEnabled:(UISwitch *)sender;
-- (void)toggleAutoReply:(UISwitch *)sender;
-- (void)toggleMemory:(UISwitch *)sender;
-- (void)wiaClearMemory:(id)sender;
-- (void)editStepTarget:(id)sender;
 @end
 
 #pragma mark - 布局常量
@@ -74,7 +57,6 @@ static const CGFloat kWIABtnH = 24.0;        // 每条建议回复按钮高度
 static const CGFloat kWIASpacing = 3.0;      // 建议回复行间距
 static const CGFloat kWIA_BTN_SZ = 18.0;      // 建议回复发送按钮尺寸
 static const CGFloat kWIAExtraGap = 4.0;     // 容器与气泡的间距
-static const NSInteger kWIAFullLines = 31;   // 读心+自适应分析块+4条回复确定性预留的行数
 
 // 结果就绪通知名：判断/起草完成后触发 cell 重新布局。
 static NSString * const kWIAIntentReadyNotification = @"com.local.wia.IntentReady";
@@ -97,8 +79,6 @@ static NSArray * const kWIACfgTones = @[ @"情绪价值", @"讨好型人格", @"
 static const NSInteger kWIARepliesPerTone = 1;   // 每个话术 1 条 → 建议回复固定 4 条
 
 @interface WIAJudgeResult : NSObject
-@property (nonatomic, copy) NSString *reframeQuestion;  // 表面问题（重述）
-@property (nonatomic, copy) NSArray *reframeOptions;    // @[{label,prob}]，prob 为 0-1
 @property (nonatomic, copy) NSString *intentQuestion;   // 当前真实意图
 @property (nonatomic, copy) NSArray *intentOptions;     // 按概率降序
 @property (nonatomic, copy) NSString *intent;           // 选中的意图（最高概率）
@@ -197,5 +177,4 @@ extern BOOL WIAIsTextMessage(id wrap);
 extern BOOL WIAIsOutgoingMessage(id wrap);
 extern BOOL WIAIsGroupMessage(id wrap);
 // 防撤回：就地替换被撤回消息后刷新对应 cell（显示在原位置）
-extern void WIARefreshRevokedCell(long long svrId, NSString *newContent, NSString *origContent);
 

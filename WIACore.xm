@@ -213,15 +213,6 @@ static NSString *WIARiskLabel(double score)
     return levels[idx];
 }
 
-// 截断到前 max 个字符（用于把消息嵌进追问问题文本，避免过长）。
-static NSString *WIATrim(NSString *s, NSUInteger max)
-{
-    if (![s isKindOfClass:[NSString class]] || s.length == 0) return s ?: @"";
-    if (s.length <= max) return s;
-    NSString *cut = [s substringToIndex:max];
-    return [cut stringByAppendingString:@"…"];
-}
-
 #pragma mark - 消息字段读取（防御性 KVC）
 
 NSString *WIAReadString(id obj, NSString *key)
@@ -432,8 +423,6 @@ static NSString *WIAChatURL(NSString *base, NSString *kind)
 
 @implementation WIAJudgeResult
 - (void)encodeWithCoder:(NSCoder *)coder {
-    [coder encodeObject:self.reframeQuestion forKey:@"rq"];
-    [coder encodeObject:self.reframeOptions forKey:@"ro"];
     [coder encodeObject:self.intentQuestion forKey:@"iq"];
     [coder encodeObject:self.intentOptions forKey:@"io"];
     [coder encodeObject:self.intent forKey:@"it"];
@@ -453,8 +442,6 @@ static NSString *WIAChatURL(NSString *base, NSString *kind)
 - (instancetype)initWithCoder:(NSCoder *)coder {
     self = [super init];
     if (self) {
-        self.reframeQuestion = [coder decodeObjectForKey:@"rq"];
-        self.reframeOptions = [coder decodeObjectForKey:@"ro"];
         self.intentQuestion = [coder decodeObjectForKey:@"iq"];
         self.intentOptions = [coder decodeObjectForKey:@"io"];
         self.intent = [coder decodeObjectForKey:@"it"];
@@ -531,7 +518,7 @@ static double WIAScoreValue(NSDictionary *answer)
     return 0.0;
 }
 
-#pragma mark - 判断层：SystemOne 多题调用（reframe / intent / risk / action）
+#pragma mark - 判断层：SystemOne 多题调用（intent / risk / action / strategy）
 
 static WIAJudgeResult *WIAJudgeSystemOne(NSString *message, NSString *chatID, NSString *context,
                                          NSError **err)
@@ -553,9 +540,6 @@ static WIAJudgeResult *WIAJudgeSystemOne(NSString *message, NSString *chatID, NS
             state = [NSString stringWithFormat:@"[相处笔记（记住的这些，供你判断时参考）]：%@\n%@", memBrief, state];
         }
     }
-    NSString *relInst = wiaRel.length
-        ? [NSString stringWithFormat:@"当前记录的关系是「%@」。关系是长期稳定的画像：一起出去玩、约饭、看电影、聊日常、有来有往等共同活动【都不改变】关系类型；称呼亲昵（老公/想你/宝贝）就继续维持原关系。只有出现明确转折信号（正式确立关系、表白、分手、绝交、身份剧变）才调整，否则【一律保持原关系】。", wiaRel]
-        : @"根据最近对话（称呼、话题、语气、频率），判断我和对方大致的关系类型。";
     NSDictionary *body = @{
         @"model" : WIAJudgeModel(),
         @"state" : state,
@@ -587,11 +571,6 @@ static WIAJudgeResult *WIAJudgeSystemOne(NSString *message, NSString *chatID, NS
                 @"type" : @"choice",
                 @"instructions" : @"这一轮我该用哪种行动策略？它决定回复的方向（推进/退让/等待/追问）。",
                 @"criteria" : WIAStrategies(),
-            },
-            @"relation" : @{
-                @"type" : @"choice",
-                @"instructions" : relInst,
-                @"criteria" : WIARelationTypes(),
             },
         },
     };
@@ -634,17 +613,6 @@ static WIAJudgeResult *WIAJudgeSystemOne(NSString *message, NSString *chatID, NS
     r.strategy = WIAChoice(strategyAns);
     if (![WIAStrategies() objectForKey:r.strategy]) {
         r.strategy = WIARuleStrategy(r.action);
-    }
-
-    // 关系：判一次 → 渐进更新关系档案（初判 / 增量 + 防跳变）
-    NSDictionary *relationAns = [answers objectForKey:@"relation"];
-    NSString *rel = WIAChoice(relationAns);
-    if (rel && [WIARelationTypes() objectForKey:rel]) {
-        double p = 0;
-        for (NSDictionary *o in (WIAProbabilities(relationAns) ?: @[])) {
-            if ([o[@"label"] isEqualToString:rel]) { p = [o[@"prob"] doubleValue]; break; }
-        }
-        // 关系档案已废弃：关系由记忆笔记维护，这里不再写关系档案
     }
 
     // —— 自适应多段：根据第一段的意图/风险，决定追加哪些追问 ——
@@ -756,9 +724,9 @@ static WIAJudgeResult *WIAJudgeChat(NSString *message, NSString *context, NSErro
     }
     NSString *sys =
         @"你是一个特别懂人心的聊天军师。根据对方发来的这句话（以及历史对话），像真人一样判断："
-        @"2)这句话背后接近哪种心态（从下面列表选，可给多个带概率）；"
-        @"3)直接回复这句话的风险（0-10 一个数）；4)该立刻回复还是先想清楚；5)最佳行动是什么；"
-        @"6)一句话人性化读心。\n"
+        @"1)这句话背后接近哪种心态（从下面列表选，可给多个带概率）；"
+        @"2)直接回复这句话的风险（0-10 一个数）；3)该立刻回复还是先想清楚；4)最佳行动是什么；"
+        @"5)一句话人性化读心。\n"
         @"心态列表：想确认你在不在乎 / 带着情绪想发作 / 要个说法交代 / 求回应求陪伴 / 随口闲聊分享 / 实际有事要办\n"
         @"动作列表：派活 / 催进度 / 问进度 / 批评 / 要解释 / 闲聊 / 邀约 / 夸奖\n"
         @"只输出一个 JSON 对象，不要任何其他文字、不要 markdown。格式："
@@ -860,28 +828,6 @@ static NSArray *WIARuleKeywords(void)
         @{ @"intent" : @"闲聊",
            @"words" : @[@"哈哈", @"今天", @"天气", @"吃饭了吗", @"在干嘛", @"累",
                         @"开心", @"分享", @"听说", @"在吗", @"嗯嗯", @"嘿嘿"] },
-    ];
-}
-
-static BOOL WIARhetoricalKeyword(NSString *msg)
-{
-    static NSArray *words;
-    static dispatch_once_t t;
-    dispatch_once(&t, ^{
-        words = @[@"是不是", @"难道", @"你说", @"在乎", @"你忘", @"有没有", @"当真", @"你心里"];
-    });
-    for (NSString *w in words) {
-        if ([msg containsString:w]) return YES;
-    }
-    return NO;
-}
-
-static NSArray *WIARuleReframe(NSString *message)
-{
-    double pNot = WIARhetoricalKeyword(message) ? 0.85 : 0.25;
-    return @[
-        @{ @"label" : @"是", @"prob" : @(1.0 - pNot) },
-        @{ @"label" : @"不是", @"prob" : @(pNot) },
     ];
 }
 
@@ -1067,49 +1013,6 @@ static NSString *WIAJudgeSummary(WIAJudgeResult *j)
     return [parts componentsJoinedByString:@"，"];
 }
 
-static NSString *WIABuildDraftPrompt(NSString *message, NSString *context, NSString *chatID,
-                                     WIAJudgeResult *j,
-                                     NSString *tone, NSString *instruction,
-                                     NSInteger n)
-{
-    NSString *summary = j ? WIAJudgeSummary(j) : @"（未判断）";
-    NSMutableString *tpl =
-        [NSMutableString stringWithString:@"刚收到一条聊天消息，你要帮我回。\n"];
-    NSString *wiaRel = WIAMemoryRelationForUser(chatID);
-    if (wiaRel.length) {
-        [tpl appendFormat:@"和对方的关系：%@。回复口吻要贴合这个关系（家人别太客套、领导要尊重、伴侣可亲昵、陌生人保持分寸）。\n", wiaRel];
-    }
-    WIAAppendMemoryBrief(tpl, chatID);
-    if (context.length) {
-        [tpl appendFormat:@"最近对话（越靠后越新）：\n%@\n", context];
-    }
-    NSDateFormatter *wiaNowFmt = [[NSDateFormatter alloc] init];
-    [wiaNowFmt setDateFormat:@"yyyy-MM-dd HH:mm EEEE"];
-    [tpl appendString:WIAWithTimeContext(chatID)];
-    [tpl appendFormat:@"现在收到（当前时间 %@）：「%@」\n",
-     [wiaNowFmt stringFromDate:[NSDate date]], message];
-    [tpl appendFormat:@"判断结果：%@\n", summary];
-    if (j.strategy.length) {
-        [tpl appendFormat:@"本轮策略：%@（%@）。回复的方向要服从这个策略：该推进就推进，该退让、等待或追问就按策略来，不要违背它。\n",
-         j.strategy, (WIAStrategies()[j.strategy] ?: @"")];
-    }
-    [tpl appendFormat:
-        @"请写 %ld 条回复候选，语气统一成下面这一种，但两条的胆量要有差别：\n"
-        @"「%@」%@\n"
-        @"硬性要求：\n"
-        @"- 结合最近对话的上下文来回，别答非所问\n"
-        @"- 别老盯一件事：对方这句若是新进展/新话题，或上一件事已经办完（已到/已吃完/已谈定），就顺着当前这句+最新进展回，别再回头催/重复提旧事；只有旧事还没办完、对方还在等结果时才继续跟进\n"
-        @"- 4 条候选必须在内容/角度/胆量上真有差异：一条稳妥、一条更皮、一条更具体、一条先接情绪，都可以；\n"
-        @"  禁止用同一句话只换语气词、感叹号或标点来凑数，也不要每条只是换个开头词。\n"
-        @"- 前一条稳妥、可以直接发出去；后一条把这个语气做足，更皮、更夸张一点也行\n"
-        @"- 每条不超过 30 个字，像日常聊天时打字的语气，不要客套话、不要解释\n"
-        @"- 只输出 %ld 行，每行一条，不要编号、不要引号、不要任何前后缀\n"
-        @"- 不要写出语气名称（不要写「%@：」这类前缀），直接从回复内容开始\n",
-        (long)n, tone, (instruction ?: @""), (long)n, tone];
-
-    return tpl;
-}
-
 #pragma mark - 候选清洗（移植自 JevPrompts.swift CandidateParser）
 
 static NSString *WIAStripRegexPrefix(NSString *s, NSRegularExpression *re)
@@ -1213,6 +1116,7 @@ static NSString *WIAGenHumanRead(NSString *message, NSString *context, NSString 
     [prompt appendFormat:@"现在对方发来：「%@」\n", message];
     [prompt appendString:
         @"请像真人一样、从多个方面判断后，给我几句「读心」，不要说教、不要客套、不要评价我。\n"
+        @"硬性要求：只基于上面最近对话和相处笔记里【确有的信息】分析；对方没提到的具体细节（发过什么内容、发生过什么事、谁是干这个的）一律【不许脑补或假设】，宁可写\"感觉是…\"也不能编造对方没说过的情节或前因；几天前的事除非对方正在主动重提，否则不当作本条消息的当下语境。\n"
         @"直接从「对方…」开头，讲清：ta 此刻的状态和语气、这句话的潜台词、我们之间该拿捏的分寸、"
         @"最适合怎么回、最不该踩的雷。总共 3 句话以内，像朋友私下分析。\n"];
 
@@ -1245,7 +1149,8 @@ static NSString *WIAGenHumanRead(NSString *message, NSString *context, NSString 
     return content.length ? content : nil;
 }
 
-static NSString *WIAGenRequest(NSString *prompt, NSError **err)
+// maxTokens/temperature 可按用途覆盖：回复生成用 400/0.9，记忆提取用更大额度、更低温度。
+static NSString *WIAGenRequestEx(NSString *prompt, NSInteger maxTokens, double temperature, NSError **err)
 {
     if (WIAGenKey().length == 0) {
         if (err) *err = [NSError errorWithDomain:@"WIA" code:-11
@@ -1259,8 +1164,8 @@ static NSString *WIAGenRequest(NSString *prompt, NSError **err)
     if ([WIAGenKind() isEqualToString:@"anthropic"]) {
         body = @{
             @"model" : WIAGenModel(),
-            @"max_tokens" : @400,
-            @"temperature" : @0.9,
+            @"max_tokens" : @(maxTokens),
+            @"temperature" : @(temperature),
             @"messages" : @[ @{ @"role" : @"user", @"content" : prompt } ],
         };
         NSMutableDictionary *h = [headers mutableCopy];
@@ -1271,8 +1176,8 @@ static NSString *WIAGenRequest(NSString *prompt, NSError **err)
         body = @{
             @"model" : WIAGenModel(),
             @"messages" : @[ @{ @"role" : @"user", @"content" : prompt } ],
-            @"max_tokens" : @400,
-            @"temperature" : @0.9,
+            @"max_tokens" : @(maxTokens),
+            @"temperature" : @(temperature),
             @"stream" : @NO,
             @"thinking" : @{ @"type" : @"disabled" },   // OpenAI 兼容：生成回复非思考，更快更像随手打字
         };
@@ -1319,21 +1224,9 @@ static NSString *WIAGenRequest(NSString *prompt, NSError **err)
     return content;
 }
 
-static NSArray *WIAGenDraft(NSString *message, NSString *context, NSString *chatID,
-                            WIAJudgeResult *j,
-                            NSString *tone, NSString *instruction,
-                            NSInteger n, NSError **err)
+static NSString *WIAGenRequest(NSString *prompt, NSError **err)
 {
-    if (WIAGenKey().length == 0) {
-        if (err) *err = [NSError errorWithDomain:@"WIA" code:-11
-                                        userInfo:@{NSLocalizedDescriptionKey:@"生成层未配置"}];
-        return @[];
-    }
-
-    NSString *prompt = WIABuildDraftPrompt(message, context, chatID, j, tone, instruction, n);
-    NSString *content = WIAGenRequest(prompt, err);
-    if (!content) return @[];
-    return WIAParseCandidates(content, n);
+    return WIAGenRequestEx(prompt, 400, 0.9, err);
 }
 
 #pragma mark - 记忆更新：让生成层模型基于「旧笔记 + 本轮对话 + 时间」重写相处笔记
@@ -1381,7 +1274,8 @@ static NSString *WIAMemoryUpdatePrompt(NSString *chatID, NSString *message, NSSt
         @"- 里程碑记关系大事：怎么认识的、表白/确定关系、约过几次/看过几部电影/一起做过的事、重要吵架和好、绝交复合等转折\n"
         @"- 时间线带时间（昨天/上周五/几月几号）\n"
         @"- 追踪进行中的事：带东西/送东西/约见面等正在推进的事，要把『当前进行到哪一步、是否已结束』写进『近期动态』最新一条和『待办承诺』；对方一有进展就同步更新，已结束/完成的事不得再当进行中\n"
-        @"- 关系稳定：『我们关系』是长期画像，一起出去玩/约饭/看电影/日常聊等共同活动【不改变】关系；称呼亲昵（老公/想你）继续保持；只有出现明确转折（正式确立、分手、绝交、身份剧变）才调整\n"
+        @"- 关系画像：『我们关系』只写当前关系结论（如 情侣/夫妻/暧昧中/朋友/同事），一句话以内；禁止把观察过程追加堆进去（不要写成「可能是…；TA称呼亲昵…」这种越来越长的流水账）\n"
+        @"- 关系稳定但有例外：日常共同活动（约饭/看电影/聊天）【不改变】关系；单次亲昵称呼也不改。但以下算明确证据、必须调整：a) 明确事实陈述（如「我们结婚好多年了」）b) 正式确立/分手/绝交/身份剧变 c) 最近对话中双方持续互称伴侣称呼（老公/老婆/宝贝/想你等多轮、双向出现）→ 直接定为情侣/伴侣\n"
         @"- 作息可变不固化：对方作息/生活习惯（上夜班、自由职业、周末带娃等）是会变的，不要写死成永久身份；观察到就记进『近期动态』并带时间，别固化到『身份背景』里\n"
         @"- 每一节没内容就留空，禁止编造；拿不准的写\"可能是\"\n"
         @"- 互动模式/亲疏边界能看出就记（谁主动、到什么程度、别碰什么）\n"
@@ -1398,7 +1292,8 @@ static NSDictionary *WIAGenMemoryUpdate(NSString *chatID, NSString *message, NSS
         return nil;
     }
     NSString *prompt = WIAMemoryUpdatePrompt(chatID, message, context);
-    NSString *content = WIAGenRequest(prompt, err);
+    // 记忆 JSON 较长（要求 ≤700 字），400 tokens 会被截断导致解析失败；提取任务也要低温度。
+    NSString *content = WIAGenRequestEx(prompt, 1200, 0.2, err);
     if (!content) return nil;
     return WIAJSONFromText(content);
 }
@@ -1463,6 +1358,14 @@ static NSString *WIABuildCombinedDraftPrompt(NSString *message, NSString *contex
         @"- 读心只用来理解局面定方向，别复述它的话，也别让 4 条都顺着读心挤成同一种口吻\n"
         @"- 结合最近对话的上下文来回，别答非所问\n"
         @"- 别老盯一件事：对方这句若是新进展/新话题，或上一件事已经办完（已到/已吃完/已谈定），就顺着当前这句+最新进展回，别再回头催/重复提旧事；只有旧事还没办完、对方还在等结果时才继续跟进\n"
+        @"- 标点拟人：别用句号结尾；逗号能断就断成短句；可用 ～、……、！？；感叹号最多一个\n"
+        @"- 长度有别：至少 1 条极短（≤8 字，像「哈哈哈」「咋了」），别每条都差不多长\n"
+        @"- 省略主语：能省主语就省（「吃了吗」不是「你吃饭了吗」），像随手打字\n"
+        @"- 不解释：别解释为什么这么说，不写「因为我觉得……」\n"
+        @"- 不叫名字：别喊对方名字或昵称，真人聊天几乎不叫\n"
+        @"- 语气词限额：啊/呀/嘛/呢/哈每条最多一个，别条条拿「哈哈」开头\n"
+        @"- emoji 限额：最多 1 条带一个 emoji，别每句都有\n"
+        @"- 允许不完整回应：不是每句都要正面接话，可以反问、吐槽，甚至只回「？」「笑死」\n"
         @"- 每条不超过 30 个字，口语短句、别书面客套、别油腻、别套话\n"
         @"- 严格按上面话术顺序输出：第 1 行对第 1 个话术、第 2 行对第 2 个话术……共 %ld 行\n"
         @"- 只输出 %ld 行，每行一条，不要编号、不要引号、不要任何前后缀，也不要写出话术名，直接从回复内容开始\n",
@@ -1524,6 +1427,14 @@ static NSString *WIABuildRealDraftPrompt(NSString *message, NSString *context,
         @"- 像熟人微信随手打字：口语、短句、别书面客套、别油腻、别套话、别写小作文\n"
         @"- 话术只是参考不是台词，别背出「鱼塘主」「高情商」那种套路腔\n"
         @"- 结合最近对话，别答非所问\n"
+        @"- 标点拟人：别用句号结尾；逗号能断就断成短句；可用 ～、……、！？；感叹号最多一个\n"
+        @"- 长度有别：至少 1 条极短（≤8 字，像「哈哈哈」「咋了」），别每条都差不多长\n"
+        @"- 省略主语：能省主语就省（「吃了吗」不是「你吃饭了吗」），像随手打字\n"
+        @"- 不解释：别解释为什么这么说，不写「因为我觉得……」\n"
+        @"- 不叫名字：别喊对方名字或昵称，真人聊天几乎不叫\n"
+        @"- 语气词限额：啊/呀/嘛/呢/哈每条最多一个，别条条拿「哈哈」开头\n"
+        @"- emoji 限额：最多 1 条带一个 emoji，别每句都有\n"
+        @"- 允许不完整回应：不是每句都要正面接话，可以反问、吐槽，甚至只回「？」「笑死」\n"
         @"- 每条不超过 30 个字，像日常聊天时打字的语气\n"
         @"- 只输出 %ld 行，每行一条，不要编号、不要引号、不要任何前后缀，直接从回复内容开始\n",
         (long)n, (long)n, (long)n];
@@ -1698,6 +1609,16 @@ NSString *WIAHistoryThread(NSString *chatID, NSInteger lines)
 
 #pragma mark - 端到端：判断（SystemOne/本地兜底）→ 各话术起草（LLM/本地模板）
 
+// 记忆更新串行执行：避免多条消息同时重写同一份笔记造成相互覆盖。
+static dispatch_queue_t WIAMemoryQueue(void) {
+    static dispatch_queue_t q;
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{
+        q = dispatch_queue_create("com.jevchat.memory", DISPATCH_QUEUE_SERIAL);
+    });
+    return q;
+}
+
 WIAJudgeResult *WIARunAnalysis(NSString *message, NSString *chatID, NSString *judgeCtx, NSString *genCtx)
 {
     WIAJudgeResult *r = nil;
@@ -1749,14 +1670,18 @@ WIAJudgeResult *WIARunAnalysis(NSString *message, NSString *chatID, NSString *ju
     NSMutableArray *replies = [NSMutableArray array];
     NSMutableArray *notes = [NSMutableArray array];
 
-    // —— 记忆档案：判断层/读心跑完后，让生成层模型更新一份「相处笔记」（有变化才写，失败不影响回复）——
+    // —— 记忆档案：判断层/读心跑完后，让生成层模型更新一份「相处笔记」（失败不影响回复）——
+    // 放到串行后台队列异步执行：记忆只是加分项，不应该挡在回复生成前面多等一个请求。
     if (wiaMemoryEnabled && WIAGenKey().length > 0 && chatID.length > 0 && message.length > 0) {
-        NSError *me = nil;
-        NSDictionary *note = WIAGenMemoryUpdate(chatID, message, genCtx, &me);
-        if (note && note.count) {
-            WIAUpdateMemoryForNote(chatID, note, nil);
-        }
-        // 失败静默：记忆更新是加分项，绝不阻塞回复
+        NSString *cid = [chatID copy], *msg = [message copy], *ctx = [genCtx copy];
+        dispatch_async(WIAMemoryQueue(), ^{
+            NSError *me = nil;
+            NSDictionary *note = WIAGenMemoryUpdate(cid, msg, ctx, &me);
+            if (note && note.count) {
+                WIAUpdateMemoryForNote(cid, note, nil);
+            }
+            // 失败静默：记忆更新是加分项，绝不阻塞回复
+        });
     }
 
     // —— 生成层：开 → 出 4 条建议回复；关 → 只显示判断层结果 ——
@@ -1782,27 +1707,21 @@ WIAJudgeResult *WIARunAnalysis(NSString *message, NSString *chatID, NSString *ju
                 cands = WIAGenDraftsReal(message, genCtx, chatID, r, 4, &ce);
             }
         }
-        if (cands.count == wantCount && cands.count > 0) {
-            [replies addObjectsFromArray:cands];
+        if (cands.count > 0) {
+            NSUInteger used = (NSUInteger)wantCount;
+            if (used > cands.count) used = cands.count;
+            [replies addObjectsFromArray:[cands subarrayWithRange:NSMakeRange(0, used)]];
+            // 只返回了部分候选：用本地模板补齐。不再逐话术串行重发（最坏会多等 4×35s）。
+            for (NSUInteger i = used; i < (NSUInteger)wantCount && i < tones.count; i++) {
+                [replies addObjectsFromArray:WIATemplateDraft(r, tones[i], kWIARepliesPerTone)];
+            }
         } else {
-            // 合并失败 / 未配置 key → 逐个话术兜底（单话术生成或本地模板）
-            for (NSUInteger i = 0; i < tones.count; i++) {
-                NSString *tone = tones[i];
-                NSString *instruction = insts[i];
-                NSError *e = nil;
-                NSArray *c2 = nil;
-                if (WIAGenKey().length > 0) {
-                    c2 = WIAGenDraft(message, genCtx, chatID, r, tone, instruction,
-                                     kWIARepliesPerTone, &e);
-                } else {
-                    c2 = WIATemplateDraft(r, tone, kWIARepliesPerTone);
-                }
-                if (e) {
-                    [notes addObject:[NSString stringWithFormat:@"「%@」失败：%@",
-                                      tone, e.localizedDescription]];
-                } else {
-                    [replies addObjectsFromArray:c2];
-                }
+            // 合并请求失败 / 未配置 key → 直接用本地模板兜底，不再发网络请求
+            if (WIAGenKey().length > 0) {
+                [notes addObject:@"生成请求失败，已用本地模板兜底"];
+            }
+            for (NSUInteger i = 0; i < tones.count && i < (NSUInteger)wantCount; i++) {
+                [replies addObjectsFromArray:WIATemplateDraft(r, tones[i], kWIARepliesPerTone)];
             }
         }
     }
@@ -1885,37 +1804,53 @@ NSDictionary *WIARelationTypes(void)
 
 NSMutableDictionary *gWIAMemory;   // chatID -> 相处笔记 dict
 
+// 存 Library/Preferences/jev：微信清缓存不扫 Preferences 目录，比 Documents/Application Support 安全
+static NSString *WIAJevDir(void) {
+    return [[NSHomeDirectory() stringByAppendingPathComponent:@"Library/Preferences"]
+            stringByAppendingPathComponent:@"jev"];
+}
 NSString *WIAMemoryPath(void) {
-    return [NSHomeDirectory() stringByAppendingPathComponent:@"Documents/wia_memory.bin"];
+    return [WIAJevDir() stringByAppendingPathComponent:@"wia_memory.bin"];
 }
 NSString *WIAMemoryBackupPath(void) {
-    // 备份放更隐蔽的 Library/Application Support，主文件被微信清掉时用它恢复
-    return [[NSHomeDirectory() stringByAppendingPathComponent:@"Library/Application Support"]
-            stringByAppendingPathComponent:@"wia_memory.bak"];
+    return [WIAJevDir() stringByAppendingPathComponent:@"wia_memory.bak"];
 }
-// 记忆兜底备份：Application Support 写不进时落到 Documents（一定可写），保证备份始终存在
+// 兜底：jev 目录写不进时的退路
 NSString *WIAMemoryFallbackPath(void) {
     return [NSHomeDirectory() stringByAppendingPathComponent:@"Documents/.wia_memory_bak.bin"];
+}
+// 历史存储位置（老数据迁移用）：旧沙盒位置 + 短暂使用过的沙盒外 /var/mobile/Library/wia
+static NSArray *WIALegacyMemoryPaths(void) {
+    NSString *home = NSHomeDirectory();
+    return @[
+        @"/var/mobile/Library/wia/wia_memory.bin",
+        @"/var/mobile/Library/wia/wia_memory.bak",
+        [home stringByAppendingPathComponent:@"Documents/wia_memory.bin"],
+        [[home stringByAppendingPathComponent:@"Library/Application Support"]
+            stringByAppendingPathComponent:@"wia_memory.bak"],
+    ];
 }
 void WIAWriteMemory(void) {
     @synchronized (WIAIntentCache()) {
         if (!gWIAMemory || gWIAMemory.count == 0) return;
         NSData *data = [NSKeyedArchiver archivedDataWithRootObject:gWIAMemory];
         if (!data) return;
-        [data writeToFile:WIAMemoryPath() atomically:YES];        // 主文件
-        // 备份：先确保 Application Support 目录存在，再写；写不进则落到 Documents 兜底
-        NSString *bk = WIAMemoryBackupPath();
-        [[NSFileManager defaultManager] createDirectoryAtPath:[bk stringByDeletingLastPathComponent]
+        [[NSFileManager defaultManager] createDirectoryAtPath:WIAJevDir()
                                  withIntermediateDirectories:YES attributes:nil error:nil];
-        if (![data writeToFile:bk atomically:YES]) {
+        [data writeToFile:WIAMemoryPath() atomically:YES];        // 主文件
+        if (![data writeToFile:WIAMemoryBackupPath() atomically:YES]) {
             [data writeToFile:WIAMemoryFallbackPath() atomically:YES];
         }
     }
 }
 void WIAReadMemory(void) {
     NSData *data = [NSData dataWithContentsOfFile:WIAMemoryPath()];
-    if (!data) data = [NSData dataWithContentsOfFile:WIAMemoryBackupPath()];  // 主文件被删则用 Application Support 备份
-    if (!data) data = [NSData dataWithContentsOfFile:WIAMemoryFallbackPath()]; // 再不行用 Documents 兜底备份
+    if (!data) data = [NSData dataWithContentsOfFile:WIAMemoryBackupPath()];
+    for (NSString *p in WIALegacyMemoryPaths()) {                 // 旧版位置迁移
+        if (data) break;
+        data = [NSData dataWithContentsOfFile:p];
+    }
+    if (!data) data = [NSData dataWithContentsOfFile:WIAMemoryFallbackPath()];
     if (!data) return;
     @try {
         id loaded = [NSKeyedUnarchiver unarchiveObjectWithData:data];
@@ -1936,7 +1871,10 @@ void WIAClearMemory(void) {
     [[NSFileManager defaultManager] removeItemAtPath:WIAMemoryPath() error:nil];
     [[NSFileManager defaultManager] removeItemAtPath:WIAMemoryBackupPath() error:nil];
     [[NSFileManager defaultManager] removeItemAtPath:WIAMemoryFallbackPath() error:nil];
-    // 兜底：删除可能失败（尤其隐蔽备份目录受限时），改写成空，确保重启后读到的一定是空
+    for (NSString *p in WIALegacyMemoryPaths()) {
+        [[NSFileManager defaultManager] removeItemAtPath:p error:nil];
+    }
+    // 兜底：删除可能失败，改写成空，确保重启后读到的一定是空
     NSData *empty = [NSKeyedArchiver archivedDataWithRootObject:@{}];
     if (empty) {
         [empty writeToFile:WIAMemoryPath() atomically:YES];

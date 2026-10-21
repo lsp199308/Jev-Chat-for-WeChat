@@ -141,7 +141,7 @@ id WIAExtractWrap(id obj)
 // 拆分消息：仅最后一个子段返回 YES（分析块只显示在长消息末尾，前面子段正常显示）。
 BOOL WIAIsLastSubViewModel(id viewModel)
 {
-    if (!viewModel) return NO;
+    if (!viewModel) return YES;   // 取不到模型时按单条处理，避免分析块被永久隐藏
     NSString *cls = [NSString stringWithUTF8String:object_getClassName(viewModel)];
     if (![cls hasPrefix:@"TextMessageSubViewModel"]) return YES;
 
@@ -163,11 +163,9 @@ BOOL WIAIsLastSubViewModel(id viewModel)
 static char kWIA_CONTAINER_KEY;
 static char kWIA_LABEL_KEY;
 static char kWIA_REPLIES_KEY;
-static char kWIA_STARTS_KEY;
 static char kWIA_SESSION_KEY;
 static char kWIA_BTNS_KEY;
 static char kWIA_SELF_KEY;
-static char kWIA_ICONS_KEY;
 static char kWIA_HEAD_KEY;
 static char kWIA_TXTS_KEY;
 
@@ -295,9 +293,7 @@ NSAttributedString *WIAAttributedText(WIAJudgeResult *r)
     UIFont *body = [UIFont systemFontOfSize:10.0];
     UIFont *small = [UIFont systemFontOfSize:8.0];
     UIFont *bold = [UIFont boldSystemFontOfSize:10.0];
-    UIFont *repl = [UIFont systemFontOfSize:15.0];
     UIColor *title = WIAThemeTextColor();
-    UIColor *head = WIAThemeTextColor();
     UIColor *normal = WIAThemeTextColor();
     UIColor *pctColor = WIAThemeTextColor();
 
@@ -354,8 +350,6 @@ NSAttributedString *WIAAttributedText(WIAJudgeResult *r)
 
 void WIAUpdateCellLabel(UIView *cell)
 {
-    UIView *container = WIAGetContainer(cell);
-
     id wrap = nil;
     SEL wrapSel = NSSelectorFromString(@"getCurrentMessageWrap");
     if ([cell respondsToSelector:wrapSel]) {
@@ -369,9 +363,12 @@ void WIAUpdateCellLabel(UIView *cell)
     BOOL pending = WIAInflightForKey(key);
 
     if (!r && !pending) {
-        container.hidden = YES;
+        // 没有分析结果时不创建整套子视图，只把复用的旧容器隐藏
+        UIView *existing = objc_getAssociatedObject(cell, &kWIA_CONTAINER_KEY);
+        if ([existing isKindOfClass:[UIView class]]) existing.hidden = YES;
         return;
     }
+    UIView *container = WIAGetContainer(cell);
 
     // 长消息拆分的多个子 cell 共享同一 key：只有最后一段子 cell 显示分析块，
     // 前面的子段正常显示消息、不挂分析。
@@ -531,54 +528,6 @@ static void WIAFindSubviews(UIView *view, Class cls, NSMutableArray *out)
     }
 }
 
-// 防撤回：就地替换被撤回消息的内容后，定位对应 cell 并刷新，让拦截提示显示在原位置
-void WIARefreshRevokedCell(long long svrId, NSString *newContent, NSString *origContent)
-{
-    @try {
-        Class cellCls = NSClassFromString(@"TextMessageCellView");
-        if (!cellCls) return;
-        NSMutableSet *cvSet = [NSMutableSet set];
-        for (UIScene *scene in [UIApplication sharedApplication].connectedScenes) {
-            if (![scene isKindOfClass:[UIWindowScene class]]) continue;
-            for (UIWindow *w in [(UIWindowScene *)scene windows]) {
-                NSMutableArray *cells = [NSMutableArray array];
-                WIAFindSubviews(w, cellCls, cells);
-                for (UIView *cell in cells) {
-                    @try {
-                        id wrap = nil;
-                        SEL sel = NSSelectorFromString(@"getCurrentMessageWrap");
-                        if ([cell respondsToSelector:sel]) wrap = ((id(*)(id,SEL))objc_msgSend)(cell, sel);
-                        BOOL hit = NO;
-                        if (wrap) {
-                            NSString *cur = @"";
-                            @try { cur = [wrap valueForKey:@"m_nsContent"] ?: @""; } @catch(NSException *e){}
-                            long long sid = 0;
-                            @try {
-                                id sv = nil;
-                                @try { sv = [wrap valueForKey:@"n64SvrID"]; } @catch(NSException *e){}
-                                if (!sv) { @try { sv = [wrap valueForKey:@"n64MesLocalID"]; } @catch(NSException *e){} }
-                                if (sv) sid = [sv longLongValue];
-                            } @catch(NSException *e){}
-                            if (sid == svrId || (origContent.length && [cur isEqualToString:origContent])) {
-                                @try { [wrap setValue:(newContent ?: @"") forKey:@"m_nsContent"]; } @catch(NSException *e){}
-                                hit = YES;
-                            }
-                        }
-                        UIView *cv = cell.superview;
-                        while (cv && ![cv isKindOfClass:[UICollectionView class]]) cv = cv.superview;
-                        if (cv) [cvSet addObject:cv];
-                    } @catch(NSException *e){}
-                }
-            }
-        }
-        for (id cv in cvSet) {
-            @try {
-                ((void(*)(id,SEL))objc_msgSend)(cv, @selector(reloadData));
-            } @catch(NSException *e){}
-        }
-    } @catch(NSException *e){}
-}
-
 void WIARefreshVisibleCells(void)
 {
     NSMutableArray *cells = [NSMutableArray array];
@@ -691,15 +640,36 @@ NSString *WIAOnScreenThread(NSString *excludeContent, NSInteger lines)
 
 // 超长消息会被微信拆成多条（分段几乎同时到达）。同会话极短窗口(3s)内的连续消息
 // 只分析第一条，其余跳过，避免一条超长消息下方堆出多个分析块、互相重叠挡住。
-static NSString *gWIAMergeContact;
-static CFAbsoluteTime gWIAMergeLast;
 #define kWIAMergeSeconds 3.0
-// 延迟合并：只分析「当前最后一条」候选。被拆分的中间分段清除分析块（保留预留空位）。
-static NSString *gWIAMergeKey;
-static NSString *gWIAMergeContent;
-static NSString *gWIAMergeJudgeCtx;
-static NSString *gWIAMergeGenCtx;
-static NSInteger gWIAMergeToken;
+// 延迟合并状态按会话隔离：不同会话的消息互不覆盖。旧实现共用一组全局变量，
+// B 会话来消息会把 A 会话的 token 顶掉，A 的 inflight 永远没人清理（一直显示"分析中…"）。
+static NSMutableDictionary *gWIAMergeStates;   // chatID -> {key,content,judgeCtx,genCtx,last,token}
+static NSMutableDictionary *gWIALastSelfSend;  // chatID -> 我最后发消息的时间（CFAbsoluteTime）
+static NSMutableDictionary *gWIALastInbound;   // chatID -> 最后收到该会话消息的时间
+static NSMutableDictionary *gWIALatestKey;     // chatID -> 最新一条消息的 key，用于丢弃迟到的旧分析结果
+
+// 纯应付/收尾消息（哈哈、嗯、好的、ok、行、表情语气词等）真人不回，自动回复也应跳过。
+// 保守判定：去掉语气词、标点、空白后一个实字都不剩，且原文很短，才算应付。
+static BOOL WIAIsFillerMessage(NSString *text)
+{
+    if (![text isKindOfClass:[NSString class]]) return NO;
+    NSString *t = [text stringByTrimmingCharactersInSet:
+                   [NSCharacterSet whitespaceAndNewlineCharacterSet]];
+    if (t.length == 0 || t.length > 6) return NO;
+    static NSCharacterSet *fillerChars;
+    static dispatch_once_t once;
+    dispatch_once(&once, ^{
+        NSMutableCharacterSet *cs = [NSMutableCharacterSet punctuationCharacterSet];
+        [cs formUnionWithCharacterSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]];
+        // 常见应付字：语气词/笑/应答。注意只收"单独用没有信息量"的字，
+        // 实义字（吃、走、在、忙……）不收，避免误伤"在吗""走吧"这类真消息。
+        [cs addCharactersInString:@"嗯哦啊呀哈嘿唉诶噢喔嘻呜呵好的行对okOK好吧嘛呢啦咯呗了"];
+        fillerChars = cs;
+    });
+    NSString *stripped = [[t componentsSeparatedByCharactersInSet:fillerChars]
+                          componentsJoinedByString:@""];
+    return stripped.length == 0;
+}
 
 %hook CMessageMgr
 
@@ -723,6 +693,10 @@ static NSInteger gWIAMergeToken;
         if (isOutgoing) {
             NSString *peer = (selfId.length ? selfId : from);
             WIAHistoryAppend(peer, @"assistant", content);
+            @synchronized (WIAIntentCache()) {
+                if (!gWIALastSelfSend) gWIALastSelfSend = [NSMutableDictionary dictionary];
+                gWIALastSelfSend[peer] = @(CFAbsoluteTimeGetCurrent());
+            }
             return;
         }
         // 判断层、生成层都关闭 → 只记历史，不分析、不显示（也不出现"分析中"）
@@ -740,24 +714,31 @@ static NSInteger gWIAMergeToken;
         if (isGroup) return; // 群聊不分析、不展示
 
         NSString *key = WIAMessageKey(wrap);
+        CFAbsoluteTime nowT = CFAbsoluteTimeGetCurrent();
 
         // 延迟合并：同会话 3s 内连续到达的分段消息，只分析「最后一条」。
         // 前面的分段成为中间段：清除其分析块（inflight/cache），保留预留空位。
-        CFAbsoluteTime nowT = CFAbsoluteTimeGetCurrent();
-        NSString *prevKey = nil;
         NSInteger myToken = 0;
         @synchronized (WIAIntentCache()) {
-            BOOL sameWin = (gWIAMergeContact && [gWIAMergeContact isEqualToString:from]
-                            && (nowT - gWIAMergeLast) < kWIAMergeSeconds);
-            if (sameWin && gWIAMergeKey.length) prevKey = gWIAMergeKey;
-            gWIAMergeContact = from;
-            gWIAMergeLast = nowT;
-            gWIAMergeKey = key;
-            gWIAMergeContent = content;
-            gWIAMergeJudgeCtx = judgeCtx;
-            gWIAMergeGenCtx = genCtx;
-            gWIAMergeToken++;
-            myToken = gWIAMergeToken;
+            if (!gWIAMergeStates) gWIAMergeStates = [NSMutableDictionary dictionary];
+            if (!gWIALastInbound) gWIALastInbound = [NSMutableDictionary dictionary];
+            if (!gWIALatestKey) gWIALatestKey = [NSMutableDictionary dictionary];
+            gWIALastInbound[from] = @(nowT);
+            gWIALatestKey[from] = key;
+
+            NSMutableDictionary *st = gWIAMergeStates[from];
+            NSString *prevKey = nil;
+            BOOL sameWin = (st != nil && (nowT - [st[@"last"] doubleValue]) < kWIAMergeSeconds);
+            if (sameWin) prevKey = st[@"key"];
+            myToken = [st[@"token"] integerValue] + 1;
+            gWIAMergeStates[from] = [@{
+                @"key" : key,
+                @"content" : content ?: @"",
+                @"judgeCtx" : judgeCtx ?: @"",
+                @"genCtx" : genCtx ?: @"",
+                @"last" : @(nowT),
+                @"token" : @(myToken)
+            } mutableCopy];
             // 前一候选成为中间段：不再显示分析块
             if (prevKey.length) {
                 [gWIAInflight removeObjectForKey:prevKey];
@@ -770,26 +751,57 @@ static NSInteger gWIAMergeToken;
         dispatch_after(dispatch_time(DISPATCH_TIME_NOW,
                                      (int64_t)(kWIAMergeSeconds * NSEC_PER_SEC)),
                        dispatch_get_main_queue(), ^{
+            NSString *msgContent = nil, *msgJudgeCtx = nil, *msgGenCtx = nil;
             @synchronized (WIAIntentCache()) {
-                if (myToken != gWIAMergeToken) return; // 已有更新的候选
-                if (gWIAInflight[gWIAMergeKey]) [gWIAInflight removeObjectForKey:gWIAMergeKey];
+                NSMutableDictionary *st = gWIAMergeStates[from];
+                if (!st || [st[@"token"] integerValue] != myToken ||
+                    ![st[@"key"] isEqualToString:key]) {
+                    // 本会话已有更新的候选：清掉自己的 inflight，交给新消息处理
+                    [gWIAInflight removeObjectForKey:key];
+                    return;
+                }
+                msgContent = st[@"content"];
+                msgJudgeCtx = st[@"judgeCtx"];
+                msgGenCtx = st[@"genCtx"];
+                [gWIAMergeStates removeObjectForKey:from];
             }
             dispatch_async(dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_DEFAULT, 0), ^{
-                WIAJudgeResult *r = WIARunAnalysis(gWIAMergeContent, gWIAMergeContact, gWIAMergeJudgeCtx, gWIAMergeGenCtx);
+                WIAJudgeResult *r = nil;
+                @try {
+                    r = WIARunAnalysis(msgContent, from, msgJudgeCtx, msgGenCtx);
+                } @catch (NSException *e) {
+                    NSLog(@"[WIA] analysis exception: %@", e);
+                }
                 @synchronized (WIAIntentCache()) {
-                    gWIAIntentCache[gWIAMergeKey] = r;
-                    WIACapIntentCache(gWIAMergeContact, gWIAMergeKey);   // 只保留当前最新1条，旧分析即弃
-                    [gWIAInflight removeObjectForKey:gWIAMergeKey];
+                    // 分析期间又来了新消息：丢弃迟到的旧结果，避免把最新结果挤掉
+                    BOOL latest = (!gWIALatestKey[from] ||
+                                   [gWIALatestKey[from] isEqualToString:key]);
+                    if (latest) {
+                        gWIAIntentCache[key] = r;
+                        WIACapIntentCache(from, key);   // 只保留当前最新1条，旧分析即弃
+                    }
+                    [gWIAInflight removeObjectForKey:key];
                 }
                 NSLog(@"[WIA] done from=%@ intent=%@ risk=%.0f action=%@ replies=%ld status=%@ detail=%@",
-                      gWIAMergeContact, r.intent, r.risk, r.action,
+                      from, r.intent, r.risk, r.action,
                       (long)r.replies.count, r.status, r.detail);
-                // 自动回复：开启且生成了建议回复 → 自动发送选定的那一条（无需手动点选）
+                // 自动回复：开启且生成了建议回复 → 自动发送选定的那一条（无需手动点选）。
+                // 发送前确认：分析期间我没有手动回复，也没有收到该会话的新消息。
+                // 真人不会句句都回：收线策略（该结束话题）或纯应付消息（哈哈/嗯/好的…）不回。
                 if (wiaAutoReplyEnabled && r.replies.count > 0) {
-                    NSInteger idx = wiaAutoReplyIndex - 1;
-                    if (idx < 0) idx = 0;
-                    if (idx >= (NSInteger)r.replies.count) idx = (NSInteger)r.replies.count - 1;
-                    WIASendReply(from, selfId, r.replies[idx]);
+                    BOOL stale = NO;
+                    @synchronized (WIAIntentCache()) {
+                        stale = ([gWIALastSelfSend[from] doubleValue] > nowT + 0.01 ||
+                                 [gWIALastInbound[from] doubleValue] > nowT + 0.01);
+                    }
+                    BOOL noReply = [r.strategy isEqualToString:@"收线"] ||
+                                   WIAIsFillerMessage(msgContent);
+                    if (!stale && !noReply) {
+                        NSInteger idx = wiaAutoReplyIndex - 1;
+                        if (idx < 0) idx = 0;
+                        if (idx >= (NSInteger)r.replies.count) idx = (NSInteger)r.replies.count - 1;
+                        WIASendReply(from, selfId, r.replies[idx]);
+                    }
                 }
                 dispatch_async(dispatch_get_main_queue(), ^{
                     [[NSNotificationCenter defaultCenter]

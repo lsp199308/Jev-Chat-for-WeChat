@@ -53,17 +53,35 @@ static void vibrateDevice() {
         [self updateAndShowToast];
         [self setupButton];
         [self setupHandle];
+
+        // tweak 加载时 connectedScenes 可能还没连上，等 App 激活后再挂一次并显示按钮
+        __weak typeof(self) weakSelf = self;
+        [[NSNotificationCenter defaultCenter]
+            addObserverForName:UIApplicationDidBecomeActiveNotification
+                        object:nil
+                         queue:[NSOperationQueue mainQueue]
+                    usingBlock:^(NSNotification *note) {
+            __strong typeof(weakSelf) strongSelf = weakSelf;
+            if (!strongSelf) return;
+            [strongSelf attachToActiveScene];
+            if (keepAliveEnabled) [strongSelf showButton];
+        }];
     }
     return self;
 }
 
-- (void)setupWindow {
+- (void)attachToActiveScene {
+    if (self.windowScene) return;
     for (UIScene *scene in UIApplication.sharedApplication.connectedScenes) {
         if ([scene isKindOfClass:[UIWindowScene class]]) {
             self.windowScene = (UIWindowScene *)scene;
             break;
         }
     }
+}
+
+- (void)setupWindow {
+    [self attachToActiveScene];
     self.windowLevel = UIWindowLevelAlert + 1;
     self.userInteractionEnabled = YES;
     self.backgroundColor = [UIColor clearColor];
@@ -120,7 +138,10 @@ static void vibrateDevice() {
 - (void)makeKeyWindow {
     [super makeKeyWindow];
     dispatch_async(dispatch_get_main_queue(), ^{
-        [UIApplication.sharedApplication.windows.firstObject makeKeyWindow];
+        // 把 key window 还给 App 自己的窗口；跳过自己，避免 windows.firstObject == self 时递归
+        for (UIWindow *w in UIApplication.sharedApplication.windows) {
+            if (w != self) { [w makeKeyWindow]; break; }
+        }
     });
 }
 
@@ -245,6 +266,9 @@ static void vibrateDevice() {
 }
 
 - (void)showButton {
+    [self attachToActiveScene];
+    if (!self.windowScene) return;   // 场景还没连上：等激活通知再显示，避免窗口挂不上
+
     self.hidden = NO;
     [self makeKeyAndVisible];
     if (!self.isDocked) {
@@ -359,15 +383,18 @@ static void vibrateDevice() {
 }
 
 - (void)startPlayingSilentAudio {
+    if (self.audioPlayer.isPlaying) return;   // 每秒只检查状态，不再重复解码/创建播放器
+
+    if (!self.audioPlayer) {
+        NSData *audioData = [[NSData alloc] initWithBase64EncodedString:kBase64Audio options:NSDataBase64DecodingIgnoreUnknownCharacters];
+        self.audioPlayer = [[AVAudioPlayer alloc] initWithData:audioData error:nil];
+        self.audioPlayer.volume = 0.0; /* no sound should be made */
+        self.audioPlayer.numberOfLoops = -1;
+        [self.audioPlayer prepareToPlay];
+    }
+    // 被其它 App 抢占后重新激活会话并继续播放
     [[AVAudioSession sharedInstance] setCategory:AVAudioSessionCategoryPlayback withOptions:AVAudioSessionCategoryOptionMixWithOthers error:nil];
     [[AVAudioSession sharedInstance] setActive:YES error:nil];
-
-    NSData *audioData = [[NSData alloc] initWithBase64EncodedString:kBase64Audio options:NSDataBase64DecodingIgnoreUnknownCharacters];
-
-    self.audioPlayer = [[AVAudioPlayer alloc] initWithData:audioData error:nil];
-    self.audioPlayer.volume = 0.0; /* no sound should be made */
-    [self.audioPlayer prepareToPlay];
-    self.audioPlayer.numberOfLoops = -1;
     [self.audioPlayer play];
 }
 
